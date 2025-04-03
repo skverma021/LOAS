@@ -1,0 +1,72 @@
+---
+- name: Gather and Configure "Logon As a Service" Rights
+  hosts: all
+  gather_facts: true
+
+  vars:
+    local_group_name: "WF_URA_LOAS"
+    account_to_add: "NT SERVICE\\himds"
+    security_policy_name: "SeServiceLogonRight"
+    csv_file_path: "/tmp/logon_as_service_info.csv" # Adjust path as needed
+    csv_header: "Hostname,OU,LogonAsServicePrincipals,LocalGroupExists,LocalGroupMembers"
+
+  tasks:
+    - name: Get current "Logon As a Service" assignments
+      win_security_policy:
+        name: "{{ security_policy_name }}"
+      register: logon_as_service_policy
+
+    - name: Check if local group "{{ local_group_name }}" exists
+      win_group:
+        name: "{{ local_group_name }}"
+      register: local_group_info
+
+    - name: Create local group "{{ local_group_name }}" if it doesn't exist
+      win_group:
+        name: "{{ local_group_name }}"
+        state: present
+      when: not local_group_info.exists
+      register: created_group_info
+
+    - name: Add account "{{ account_to_add }}" to local group "{{ local_group_name }}" if not present
+      win_group_members:
+        name: "{{ local_group_name }}"
+        users: "{{ account_to_add }}"
+        state: present
+      when: not local_group_info.exists or (local_group_info.exists and account_to_add not in local_group_info.members)
+      register: added_member_info
+
+    - name: Add local group "{{ local_group_name }}" to "Logon As a Service" if not present
+      win_security_policy:
+        name: "{{ security_policy_name }}"
+        users: "{{ local_group_name }}"
+        state: present
+      when: "{{ local_group_name }} not in logon_as_service_policy.users"
+      register: added_policy_info
+
+    - name: Prepare data for CSV
+      set_fact:
+        logon_principals: "{{ logon_as_service_policy.users | join(';') }}"
+        ou_details: "{{ ansible_facts.ansible_windows.details.organizationalunit | default('N/A') }}"
+        local_group_members_str: "{{ local_group_info.members | default([]) | join(';') }}"
+
+    - name: Append data to CSV file
+      lineinfile:
+        path: "{{ csv_file_path }}"
+        line: "{{ ansible_hostname }},{{ ou_details }},{{ logon_principals }},{{ local_group_info.exists }},{{ local_group_members_str }}"
+        create: true
+      delegate_to: localhost
+      run_once: true # Only run once to avoid duplicate entries
+
+    - name: Display Results (Tabular Format)
+      debug:
+        msg: |
+          +---------------------+--------------------------------------+-----------------------------------------------------------------+---------------------+---------------------------------------+
+          | Hostname            | OU                                   | Logon As a Service Principals                                   | Local Group Exists  | Local Group Members                   |
+          +---------------------+--------------------------------------+-----------------------------------------------------------------+---------------------+---------------------------------------+
+          {% for host in play_hosts %}
+          | {{ host | truncate(19) | ljust(19) }} | {{ hostvars[host].ou_details | truncate(36) | ljust(36) }} | {{ hostvars[host].logon_principals | truncate(63) | ljust(63) }} | {{ hostvars[host].local_group_info.exists | string | truncate(19) | ljust(19) }} | {{ hostvars[host].local_group_members_str | truncate(37) | ljust(37) }} |
+          {% endfor %}
+          +---------------------+--------------------------------------+-----------------------------------------------------------------+---------------------+---------------------------------------+
+      delegate_to: localhost
+      run_once: true
